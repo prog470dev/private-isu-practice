@@ -19,3 +19,6 @@ portal/tmp
 
 # log
 reports/*
+
+# images
+webapp/public/image/*
