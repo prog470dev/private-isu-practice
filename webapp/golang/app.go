@@ -165,6 +165,22 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, error) {
 	var posts []Post
 
+	var commentsCountKeys []string
+	var commentsKeys []string
+	var b string
+	if allComments {
+		b = ".true"
+	} else {
+		b = ".false"
+	}
+	for _, p := range results {
+		commentsCountKeys = append(commentsCountKeys, "comments."+strconv.Itoa(p.ID)+".count")
+		commentsKeys = append(commentsKeys, "comments"+strconv.Itoa(p.ID)+b)
+	}
+
+	cachedCommentCounts, err := memcacheClient.GetMulti(commentsCountKeys)
+	cachedComments, err := memcacheClient.GetMulti(commentsKeys)
+
 	for _, p := range results {
 		commentsCountKey := "comments." + strconv.Itoa(p.ID) + ".count"
 		var b string
@@ -175,8 +191,9 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 		}
 		commentsKey := "comments" + strconv.Itoa(p.ID) + b
 
-		cached_comment_count, err := memcacheClient.Get(commentsCountKey)
-		if err != nil {
+		// cachedCommentCount, err := memcacheClient.Get(commentsCountKey)
+		cachedCommentCount, ok := cachedCommentCounts[commentsCountKey]
+		if !ok {
 			// キャッシュミスした場合は、DB から値を取得してキャッシュを作成
 			err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
 			if err != nil {
@@ -185,15 +202,16 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 			}
 			memcacheClient.Set(&memcache.Item{Key: commentsCountKey, Value: []byte(strconv.Itoa(p.CommentCount))})
 		} else {
-			p.CommentCount, err = strconv.Atoi(string(cached_comment_count.Value))
+			p.CommentCount, err = strconv.Atoi(string(cachedCommentCount.Value))
 			if err != nil {
 				log.Print(err)
 				return nil, err
 			}
 		}
 
-		cached_comments, err := memcacheClient.Get(commentsKey)
-		if err != nil {
+		// cachedComments, err := memcacheClient.Get(commentsKey)
+		cachedComments, ok := cachedComments[commentsKey]
+		if !ok {
 			// キャッシュミスした場合は、DB から値を取得してキャッシュを作成
 			query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
 			if !allComments {
@@ -229,7 +247,7 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 			memcacheClient.Set(&memcache.Item{Key: commentsKey, Value: []byte(encodedVale)})
 		} else {
 			var decodedVale []Comment
-			if err := json.Unmarshal(cached_comments.Value, &decodedVale); err != nil {
+			if err := json.Unmarshal(cachedComments.Value, &decodedVale); err != nil {
 				log.Print(err)
 				return nil, err
 			}
