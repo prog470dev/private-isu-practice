@@ -30,9 +30,10 @@ var (
 )
 
 const (
-	postsPerPage  = 20
-	ISO8601Format = "2006-01-02T15:04:05-07:00"
-	UploadLimit   = 10 * 1024 * 1024 // 10mb
+	postsPerPage         = 20
+	ISO8601Format        = "2006-01-02T15:04:05-07:00"
+	UploadLimit          = 10 * 1024 * 1024 // 10mb
+	ImageDir      string = "/home/isucon/private_isu/webapp/public/image"
 )
 
 type User struct {
@@ -619,16 +620,17 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mime := ""
+	// mime := ""
+	mime, ext := "", ""
 	if file != nil {
 		// 投稿のContent-Typeからファイルのタイプを決定する
 		contentType := header.Header["Content-Type"][0]
 		if strings.Contains(contentType, "jpeg") {
-			mime = "image/jpeg"
+			mime, ext = "image/jpeg", "jpg"
 		} else if strings.Contains(contentType, "png") {
-			mime = "image/png"
+			mime, ext = "image/png", "png"
 		} else if strings.Contains(contentType, "gif") {
-			mime = "image/gif"
+			mime, ext = "image/gif", "gif"
 		} else {
 			session := getSession(r)
 			session.Values["notice"] = "投稿できる画像形式はjpgとpngとgifだけです"
@@ -659,7 +661,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		query,
 		me.ID,
 		mime,
-		filedata,
+		"",
 		r.FormValue("body"),
 	)
 	if err != nil {
@@ -672,6 +674,20 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		log.Print(err)
 		return
 	}
+
+	imgFile := ImageDir + "/" + strconv.FormatInt(pid, 10) + "." + ext
+	f, err := os.Create(imgFile)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	_, err = f.Write(filedata)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	err = os.Chmod(imgFile, 0644)
+	f.Close()
 
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 }
@@ -696,8 +712,24 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	if ext == "jpg" && post.Mime == "image/jpeg" ||
 		ext == "png" && post.Mime == "image/png" ||
 		ext == "gif" && post.Mime == "image/gif" {
+
+		// 取得されたタイミングでファイルに書き出す
+		imgFile := ImageDir + "/" + pidStr + "." + ext
+		f, err := os.Create(imgFile)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+		_, err = f.Write(post.Imgdata)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+		err = os.Chmod(imgFile, 0644)
+		f.Close()
+
 		w.Header().Set("Content-Type", post.Mime)
-		_, err := w.Write(post.Imgdata)
+		_, err = w.Write(post.Imgdata)
 		if err != nil {
 			log.Print(err)
 			return
