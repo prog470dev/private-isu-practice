@@ -1,0 +1,1 @@
+ALTER TABLE isuconp.posts ADD INDEX created_at_idx (created_at DESC);
