@@ -2,6 +2,7 @@ package main
 
 import (
 	crand "crypto/rand"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
@@ -25,8 +26,9 @@ import (
 )
 
 var (
-	db    *sqlx.DB
-	store *gsm.MemcacheStore
+	db             *sqlx.DB
+	store          *gsm.MemcacheStore
+	memcacheClient *memcache.Client
 )
 
 const (
@@ -59,11 +61,11 @@ type Post struct {
 }
 
 type Comment struct {
-	ID        int       `db:"id"`
-	PostID    int       `db:"post_id"`
-	UserID    int       `db:"user_id"`
-	Comment   string    `db:"comment"`
-	CreatedAt time.Time `db:"created_at"`
+	ID        int       `db:"id" json:"id"`
+	PostID    int       `db:"post_id" json:"post_id"`
+	UserID    int       `db:"user_id" json:"user_id"`
+	Comment   string    `db:"comment" json:"comment"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	User      User
 }
 
@@ -72,7 +74,7 @@ func init() {
 	if memdAddr == "" {
 		memdAddr = "localhost:11211"
 	}
-	memcacheClient := memcache.New(memdAddr)
+	memcacheClient = memcache.New(memdAddr)
 	store = gsm.NewMemcacheStore(memcacheClient, "iscogram_", []byte("sendagaya"))
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 }
@@ -176,34 +178,75 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 	var posts []Post
 
 	for _, p := range results {
-		err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-		if err != nil {
-			return nil, err
+		commentsCountKey := "comments." + strconv.Itoa(p.ID) + ".count"
+		var b string
+		if allComments {
+			b = ".true"
+		} else {
+			b = ".false"
 		}
+		commentsKey := "comments" + strconv.Itoa(p.ID) + b
 
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
-		if !allComments {
-			query += " LIMIT 3"
-		}
-		var comments []Comment
-		err = db.Select(&comments, query, p.ID)
+		cached_comment_count, err := memcacheClient.Get(commentsCountKey)
 		if err != nil {
-			return nil, err
-		}
-
-		for i := 0; i < len(comments); i++ {
-			err := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
+			// キャッシュミスした場合は、DB から値を取得してキャッシュを作成
+			err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
 			if err != nil {
+				log.Print(err)
+				return nil, err
+			}
+			memcacheClient.Set(&memcache.Item{Key: commentsCountKey, Value: []byte(strconv.Itoa(p.CommentCount))})
+		} else {
+			p.CommentCount, err = strconv.Atoi(string(cached_comment_count.Value))
+			if err != nil {
+				log.Print(err)
 				return nil, err
 			}
 		}
 
-		// reverse
-		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
-			comments[i], comments[j] = comments[j], comments[i]
-		}
+		cached_comments, err := memcacheClient.Get(commentsKey)
+		if err != nil {
+			// キャッシュミスした場合は、DB から値を取得してキャッシュを作成
+			query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
+			if !allComments {
+				query += " LIMIT 3"
+			}
+			var comments []Comment
+			err = db.Select(&comments, query, p.ID)
+			if err != nil {
+				log.Print(err)
+				return nil, err
+			}
 
-		p.Comments = comments
+			for i := 0; i < len(comments); i++ {
+				err := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
+				if err != nil {
+					log.Print(err)
+					return nil, err
+				}
+			}
+
+			// reverse
+			for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
+				comments[i], comments[j] = comments[j], comments[i]
+			}
+
+			p.Comments = comments
+
+			encodedVale, err := json.Marshal(p.Comments)
+			if err != nil {
+				log.Print(err)
+				return nil, err
+			}
+			memcacheClient.Set(&memcache.Item{Key: commentsKey, Value: []byte(encodedVale)})
+		} else {
+			var decodedVale []Comment
+			if err := json.Unmarshal(cached_comments.Value, &decodedVale); err != nil {
+				log.Print(err)
+				return nil, err
+			}
+			p.Comments = decodedVale
+		}
 
 		p.CSRFToken = csrfToken
 
@@ -757,6 +800,11 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		log.Print("post_idは整数のみです")
 		return
 	}
+
+	// コメントが投稿された投稿のキャッシュをクリアしておく
+	memcacheClient.Delete("comments." + strconv.Itoa(postID) + ".count")
+	memcacheClient.Delete("comments." + strconv.Itoa(postID) + ".true")
+	memcacheClient.Delete("comments." + strconv.Itoa(postID) + ".false")
 
 	query := "INSERT INTO `comments` (`post_id`, `user_id`, `comment`) VALUES (?,?,?)"
 	_, err = db.Exec(query, postID, me.ID, r.FormValue("comment"))
